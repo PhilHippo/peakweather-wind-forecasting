@@ -1,0 +1,11 @@
+# @package _global_
+
+#### Model params #############################################################
+model:
+  name: tcn
+  hparams:
+    hidden_size: 128
+    num_layers: 3
+    kernel_size: 3
+    dropout: 0.2
+

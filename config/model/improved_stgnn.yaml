@@ -1,0 +1,13 @@
+# @package _global_
+
+#### Model params #############################################################
+model:
+  name: improved_stgnn
+  hparams:
+    hidden_size: 128
+    emb_size: 32
+    rnn_layers: 2
+    gnn_layers: 4
+    gnn_kernel: 2
+    dropout: 0.2
+

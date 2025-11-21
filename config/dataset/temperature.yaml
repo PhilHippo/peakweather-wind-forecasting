@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - _self_
+
+#### Dataset params ###########################################################
+dataset:
+  name: Temperature
+  hparams:
+    target_channels: 
+      - temperature
+    covariate_channels: other
+    freq: h
+    extended_topo_vars:
+      - DEM
+      - SLOPE_2000M_SIGRATIO1
+  connectivity:
+    layout: edge_index
+    include_self: False
+    theta: 50
+    threshold: 0.9
+
+#### Windowing params #########################################################
+window: 6
+horizon: 24
+stride: 1
+

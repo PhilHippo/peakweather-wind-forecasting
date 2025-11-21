@@ -35,3 +35,4 @@ optimizer:
     lr: 0.001
 
 nwp_test_set: False
+load_model_path: null
