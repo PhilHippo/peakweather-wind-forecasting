@@ -20,7 +20,7 @@ dataset:
     threshold: 0.9
 
 #### Windowing params #########################################################
-window: 6
+window: 168
 horizon: 24
 stride: 1
 
