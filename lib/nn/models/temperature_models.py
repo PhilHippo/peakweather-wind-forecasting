@@ -3,6 +3,7 @@ import torch.nn as nn
 from einops import rearrange
 from tsl.nn.blocks.encoders import RNN
 from tsl.nn.layers import NodeEmbedding, DiffConv
+from tsl.nn.models import BaseModel
 
 # MODEL 0: TCN
 class TemporalBlock(nn.Module):
@@ -28,9 +29,9 @@ class TemporalBlock(nn.Module):
         res = x if self.downsample is None else self.downsample(x)
         return self.relu(out + res)
 
-class TCNModel(nn.Module):
+class TCNModel(BaseModel):
     def __init__(self, input_size, n_nodes, horizon, exog_size=0, output_size=None, hidden_size=32, num_layers=3, kernel_size=3, dropout=0.2):
-        super().__init__()
+        super(TCNModel, self).__init__()
         self.input_proj = nn.Linear(input_size + exog_size, hidden_size)
         layers = [TemporalBlock(hidden_size, hidden_size, kernel_size, 2**i, dropout) for i in range(num_layers)]
         self.tcn = nn.Sequential(*layers)
@@ -67,9 +68,9 @@ class TCNModel(nn.Module):
 
 
 # MODEL 1: Enhanced RNN
-class EnhancedRNNModel(nn.Module):
+class EnhancedRNNModel(BaseModel):
     def __init__(self, input_size, n_nodes, horizon, exog_size=0, output_size=None, hidden_size=64, emb_size=32, rnn_layers=2, dropout=0.2):
-        super().__init__()
+        super(EnhancedRNNModel, self).__init__()
         self.encoder = nn.Linear(input_size + exog_size, hidden_size)
         self.node_embeddings = NodeEmbedding(n_nodes, emb_size)
         self.emb_proj = nn.Linear(emb_size, hidden_size)
@@ -107,9 +108,9 @@ class EnhancedRNNModel(nn.Module):
         return out
 
 # MODEL 2: Improved STGNN
-class ImprovedSTGNN(nn.Module):
+class ImprovedSTGNN(BaseModel):
     def __init__(self, input_size, n_nodes, horizon, exog_size=0, output_size=None, hidden_size=64, emb_size=32, rnn_layers=2, gnn_layers=2, gnn_kernel=2, dropout=0.2):
-        super().__init__()
+        super(ImprovedSTGNN, self).__init__()
         self.encoder = nn.Linear(input_size + exog_size, hidden_size)
         self.node_embeddings = NodeEmbedding(n_nodes, emb_size)
         self.temporal_encoder = RNN(input_size=hidden_size + emb_size, hidden_size=hidden_size, n_layers=rnn_layers, cell='gru', return_only_last_state=True, dropout=dropout)

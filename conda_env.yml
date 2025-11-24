@@ -1,14 +1,14 @@
 name: peakweather-env
 channels:
   - pytorch
-  - nvidia                  # remove for cpu installation
+  - nvidia # remove for cpu installation
   - pyg
   - conda-forge
   - defaults
 dependencies:
   - python=3.10
   - pytorch=2.1
-  - pytorch-cuda=12.1       # remove for cpu installation
+  - pytorch-cuda=12.1 # remove for cpu installation
   - lightning=2.1
   - numpy<2
   - pyg=2.4

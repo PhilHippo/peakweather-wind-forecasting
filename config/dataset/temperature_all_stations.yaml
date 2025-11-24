@@ -4,13 +4,13 @@ defaults:
 
 #### Dataset params ###########################################################
 dataset:
-  name: Temperature
+  name: Temperature_AllStations
   hparams:
     target_channels:
       - temperature
     covariate_channels: other  # Use all 8 sensor variables as covariates
     freq: h
-    station_type: weather  # Use weather stations only (for Deliverable 2)
+    station_type: null  # Use both weather stations AND rain gauges (for Deliverable 3)
     extended_topo_vars:
       - DEM
       - SLOPE_2000M_SIGRATIO1
@@ -36,4 +36,3 @@ dataset:
 window: 6
 horizon: 24
 stride: 1
-
