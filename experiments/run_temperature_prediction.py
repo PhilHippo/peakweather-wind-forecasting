@@ -1,0 +1,317 @@
+import os
+import numpy as np
+import omegaconf
+import torch
+from omegaconf import DictConfig
+from pytorch_lightning import Trainer
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
+from pytorch_lightning.loggers import MLFlowLogger
+from tsl import logger
+from tsl.data import SpatioTemporalDataset, SpatioTemporalDataModule
+from tsl.data.preprocessing import scalers
+from tsl.experiment import Experiment
+from tsl.metrics import torch_metrics
+from tsl.nn import models as tsl_models
+
+import lib
+from lib.datasets import PeakWeather
+from lib.nn import models
+import lib.metrics
+from lib.nn.models import temperature_models
+from lib.nn.predictors import Predictor, SamplingPredictor
+
+def get_model_class(model_str):
+    # Forecasting models  ###############################################
+    if model_str == 'tcn':
+        model = temperature_models.TCNModel
+    elif model_str == 'enhanced_rnn':
+        model = temperature_models.EnhancedRNNModel
+    elif model_str == 'improved_stgnn':
+        model = temperature_models.ImprovedSTGNN
+    elif model_str == 'attn_longterm':
+        model = models.AttentionLongTermSTGNN
+    else:
+        raise NotImplementedError(f'Model "{model_str}" not available.')
+    return model
+
+def run(cfg: DictConfig):
+    ########################################
+    # Get Dataset                          #
+    ########################################
+    # Load dataset with explicit target and covariate separation
+    dataset = PeakWeather(**cfg.dataset.hparams)
+    
+    # Get connectivity
+    adj = dataset.get_connectivity(**cfg.dataset.connectivity)
+    # Get mask
+    mask = dataset.get_mask()
+
+    # Get covariates
+    # Similar to run_wind_prediction.py, but simplified for temperature
+    u = []
+    if cfg.dataset.get('covariates', {}).get('year', False):
+        u.append(dataset.datetime_encoded('year').values)
+    if cfg.dataset.get('covariates', {}).get('day', False):
+        u.append(dataset.datetime_encoded('day').values)
+    if cfg.dataset.get('covariates', {}).get('weekday', False):
+        u.append(dataset.datetime_onehot('weekday').values)
+    if cfg.dataset.get('covariates', {}).get('mask', False):
+        u.append(mask.astype(np.float32))
+        
+    # Add 'u' from dataset (which contains other weather vars if configured)
+    # Extract the actual numpy array using get_frame, similar to run_wind_prediction.py
+    if 'u' in dataset.covariates:
+        other_channels = dataset.get_frame('u', return_pattern=False)
+        u.append(other_channels)
+        if cfg.dataset.get('covariates', {}).get('u_mask', False):
+            u_mask = dataset.get_frame('u_mask', return_pattern=False)
+            u.append(u_mask)
+        
+    # Concatenate covariates
+    if len(u):
+        ndim = max(u_.ndim for u_ in u)
+        u = np.concatenate([np.repeat(u_[:, None], dataset.n_nodes, 1)
+                            if u_.ndim < ndim else u_
+                            for u_ in u], axis=-1)
+    else:
+        u = None
+
+    # Get static information
+    covs = {}
+    if u is not None:
+        covs['u'] = u
+        
+    # Add static variables if present (e.g. topography)
+    # In PeakWeather dataset.py, static vars might be in stations_table or separate.
+    # run_wind_prediction.py added 'v' manually from stations_table.
+    if cfg.dataset.get('static_attributes', None):
+        v = dataset.stations_table[[*cfg.dataset.static_attributes]]
+        v = (v - v.mean(0)) / v.std(0)
+        covs["v"] = v.values
+
+    # Scale input features
+    scaler_cfg = cfg.get('scaler')
+    if scaler_cfg is not None:
+        scale_axis = (0,) if scaler_cfg.axis == 'node' else (0, 1)
+        scaler_cls = getattr(scalers, f'{scaler_cfg.method}Scaler')
+        transform = dict(target=scaler_cls(axis=scale_axis))
+        scale_target = scaler_cfg.get('scale_target', False)
+    else:
+        # Default scaling for temperature if not specified
+        transform = dict(target=scalers.StandardScaler(axis=(0, 1)))
+        scale_target = True
+
+    torch_dataset = SpatioTemporalDataset(dataset.dataframe(),
+                                          mask=dataset.mask,
+                                          covariates=covs,
+                                          connectivity=adj,
+                                          horizon=cfg.horizon,
+                                          window=cfg.window,
+                                          stride=cfg.stride)
+
+    dm = SpatioTemporalDataModule(
+        dataset=torch_dataset,
+        scalers=transform,
+        splitter=dataset.get_splitter(
+            first_val_ts=[2024, 1, 1],
+            first_test_ts=[2024, 4, 1]
+        ),
+        mask_scaling=True,
+        batch_size=cfg.batch_size,
+        workers=cfg.get('workers', 0)
+    )
+    dm.setup()
+
+    print(f"Split sizes\n\tTrain: {len(dm.trainset)}\n"
+          f"\tValidation: {len(dm.valset)}\n"
+          f"\tTest: {len(dm.testset)}")
+
+    ########################################
+    # Create model                         #
+    ########################################
+
+    model_cls = get_model_class(cfg.model.name)
+
+    d_exog = torch_dataset.input_map.u.shape[-1] if 'u' in covs else 0
+    d_exog += torch_dataset.input_map.v.shape[-1] if 'v' in covs else 0
+    
+    model_kwargs = dict(n_nodes=torch_dataset.n_nodes,
+                        input_size=torch_dataset.n_channels,
+                        exog_size=d_exog,
+                        output_size=torch_dataset.n_channels,
+                        horizon=torch_dataset.horizon)
+
+    # filter_model_args_ might not exist on custom models, so we might need to be careful
+    if hasattr(model_cls, 'filter_model_args_'):
+        model_cls.filter_model_args_(model_kwargs)
+    model_kwargs.update(cfg.model.hparams)
+
+    ########################################
+    # predictor                            #
+    ########################################
+
+    if cfg.get('loss_fn') == "mae":
+        loss_fn = torch_metrics.MaskedMAE()
+    elif cfg.get('loss_fn') == "ens":
+        loss_fn = lib.metrics.EnergyScore()
+    else:
+        # Default to MAE if not specified
+        loss_fn = torch_metrics.MaskedMAE()
+    
+    mae_at = [1, 3, 6, 12, 18, 24]
+    point_metrics = {'mae': torch_metrics.MaskedMAE(),
+                     **{f'mae_{h:d}h': torch_metrics.MaskedMAE(at=h-1) for h in mae_at if h <= cfg.horizon},
+                     'mse': torch_metrics.MaskedMSE(),
+                     }
+    
+    sample_metrics = {'smae': lib.metrics.SampleMAE(),
+                      **{f'smae_{h:d}h': lib.metrics.SampleMAE(at=h-1) for h in mae_at if h <= cfg.horizon},
+                      'smse': lib.metrics.SampleMSE(),
+                      'ens': lib.metrics.EnergyScore(),
+                      **{f'ens_{h:d}h': lib.metrics.EnergyScore(at=h-1) for h in mae_at if h <= cfg.horizon},
+                      }
+
+    if cfg.get('lr_scheduler') is not None:
+        scheduler_class = getattr(torch.optim.lr_scheduler,
+                                  cfg.lr_scheduler.name)
+        scheduler_kwargs = dict(cfg.lr_scheduler.hparams)
+    else:
+        scheduler_class = scheduler_kwargs = None
+
+    # select the appropriate predictor    
+    if isinstance(loss_fn, lib.metrics.SampleMetric):
+        predictor_class = SamplingPredictor
+        assert not point_metrics.keys() & sample_metrics.keys()
+        log_metrics = dict(**point_metrics, **sample_metrics)
+        predictor_kwargs = dict(**cfg.get('sampling', {}))
+        monitored_metric = 'val_smae'
+    else:
+        predictor_class = Predictor
+        log_metrics = point_metrics
+        predictor_kwargs = dict()
+        monitored_metric = 'val_mae'
+    
+    # setup predictor
+    predictor = predictor_class(
+        model_class=model_cls,
+        model_kwargs=model_kwargs,
+        optim_class=getattr(torch.optim, cfg.get('optimizer', {}).get('name', 'Adam')),
+        optim_kwargs=dict(cfg.get('optimizer', {}).get('hparams', {'lr': 0.001})),
+        loss_fn=loss_fn,
+        metrics=log_metrics,
+        scheduler_class=scheduler_class,
+        scheduler_kwargs=scheduler_kwargs,
+        scale_target=scale_target,
+        **predictor_kwargs
+    )
+
+    ########################################
+    # training                             #
+    ########################################
+
+    early_stop_callback = EarlyStopping(
+        monitor=monitored_metric,
+        patience=cfg.patience,
+        mode='min'
+    )
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=cfg.run.dir,
+        save_top_k=1,
+        monitor=monitored_metric,
+        mode='min',
+    )
+
+    lr_monitor = LearningRateMonitor(logging_interval='step')
+
+    # Will place the logs in ./mlruns
+    mlflow_tracking_uri = cfg.get('mlflow_tracking_uri', './mlruns')
+    exp_logger = MLFlowLogger(experiment_name=cfg.experiment_name, tracking_uri=mlflow_tracking_uri)
+
+    # Print MLflow tracking URL (it's possible to use a remote or custom MLflow server)
+    if mlflow_tracking_uri is None or mlflow_tracking_uri == './mlruns' or mlflow_tracking_uri.startswith('file://'):
+        # Local file-based tracking
+        import os
+        abs_mlruns_path = os.path.abspath('./mlruns')
+        mlflow_url = f"file://{abs_mlruns_path}"
+        print(f"\n{'='*80}")
+        print(f"MLflow Tracking:")
+        print(f"  Tracking URI: {mlflow_url}")
+        print(f"  Experiment: {cfg.experiment_name}")
+        print(f"\n  To view results, run: mlflow ui --backend-store-uri {abs_mlruns_path}")
+        print(f"  Then open: http://127.0.0.1:5000")
+        print(f"{'='*80}\n")
+    else:
+        # Remote tracking server
+        print(f"\n{'='*80}")
+        print(f"MLflow Tracking:")
+        print(f"  Tracking URI: {mlflow_tracking_uri}")
+        print(f"  Experiment: {cfg.experiment_name}")
+        print(f"  Access UI at: {mlflow_tracking_uri}")
+        print(f"{'='*80}\n")
+
+    trainer = Trainer(max_epochs=cfg.epochs,
+                      default_root_dir=cfg.run.dir,
+                      logger=exp_logger,
+                      accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+                      gradient_clip_val=cfg.grad_clip_val,
+                      callbacks=[early_stop_callback, checkpoint_callback, lr_monitor]
+                      )
+
+    load_model_path = cfg.get('load_model_path')
+    
+    if load_model_path is not None:
+        print(f"Loading model from checkpoint: {load_model_path}")
+        predictor.load_model(load_model_path)
+    else:
+        trainer.fit(predictor,
+                    train_dataloaders=dm.train_dataloader(),
+                    val_dataloaders=dm.val_dataloader())
+        best_checkpoint_path = checkpoint_callback.best_model_path
+        predictor.load_model(best_checkpoint_path)
+        
+        # Print training summary
+        print(f"\n{'='*80}")
+        print(f"Training Complete!")
+        print(f"  Best checkpoint: {best_checkpoint_path}")
+        print(f"  Best validation metric ({monitored_metric}): {checkpoint_callback.best_model_score.item():.4f}")
+        
+        # Print MLflow run URL after training
+        if hasattr(exp_logger, 'run_id') and exp_logger.run_id:
+            if mlflow_tracking_uri is None or mlflow_tracking_uri == './mlruns' or mlflow_tracking_uri.startswith('file://'):
+                import os
+                abs_mlruns_path = os.path.abspath('./mlruns')
+                print(f"\n  MLflow Run Details:")
+                print(f"    Run ID: {exp_logger.run_id}")
+                print(f"    Experiment: {cfg.experiment_name}")
+                print(f"    View run: mlflow ui --backend-store-uri {abs_mlruns_path}")
+                print(f"    Then navigate to: http://127.0.0.1:5000")
+            else:
+                print(f"\n  MLflow Run Details:")
+                print(f"    Run ID: {exp_logger.run_id}")
+                print(f"    Experiment: {cfg.experiment_name}")
+                print(f"    View run at: {mlflow_tracking_uri}")
+        print(f"{'='*80}\n")
+
+    predictor.freeze()
+    
+    if load_model_path is None:
+        result = checkpoint_callback.best_model_score.item()
+    else:
+        result = dict()
+
+    ########################################
+    # testing                              #
+    ########################################
+    
+    trainer.test(predictor, dataloaders=dm.test_dataloader())
+
+    return result
+
+
+if __name__ == '__main__':
+    exp = Experiment(run_fn=run, config_path='../config/',
+                     config_name='default')
+    res = exp.run()
+    logger.info(res)
+
