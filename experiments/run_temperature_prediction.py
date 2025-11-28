@@ -116,7 +116,12 @@ def run(cfg: DictConfig):
     # run_wind_prediction.py added 'v' manually from stations_table.
     if cfg.dataset.get('static_attributes', None):
         v = dataset.stations_table[[*cfg.dataset.static_attributes]]
-        v = (v - v.mean(0)) / v.std(0)
+        # Standardize with safeguard against zero std
+        v_mean = v.mean(0)
+        v_std = v.std(0)
+        # Replace zero std with 1.0 to avoid division by zero
+        v_std = v_std.replace(0.0, 1.0)
+        v = (v - v_mean) / v_std
         covs["v"] = v.values
 
     # Scale input features
@@ -138,6 +143,25 @@ def run(cfg: DictConfig):
                                           horizon=cfg.horizon,
                                           window=cfg.window,
                                           stride=cfg.stride)
+    
+    # Sanity check for NaN/Inf in data
+    data_df = dataset.dataframe()
+    if np.isnan(data_df.values).any():
+        logger.warning(f"Found {np.isnan(data_df.values).sum()} NaN values in target data")
+    if np.isinf(data_df.values).any():
+        logger.warning(f"Found {np.isinf(data_df.values).sum()} Inf values in target data")
+    
+    if 'u' in covs:
+        if np.isnan(covs['u']).any():
+            logger.warning(f"Found {np.isnan(covs['u']).sum()} NaN values in covariates")
+        if np.isinf(covs['u']).any():
+            raise ValueError(f"Found {np.isinf(covs['u']).sum()} Inf values in covariates - check data preprocessing!")
+    
+    if 'v' in covs:
+        if np.isnan(covs['v']).any():
+            logger.warning(f"Found {np.isnan(covs['v']).sum()} NaN values in static attributes")
+        if np.isinf(covs['v']).any():
+            raise ValueError(f"Found {np.isinf(covs['v']).sum()} Inf values in static attributes - check standardization!")
 
     dm = SpatioTemporalDataModule(
         dataset=torch_dataset,
@@ -180,13 +204,18 @@ def run(cfg: DictConfig):
     # predictor                            #
     ########################################
 
+    # Determine if we're using a baseline model
+    is_baseline_or_icon = is_baseline_model(cfg.model.name) or is_icon_model(cfg.model.name)
+    
+    # Use sample-based loss for probabilistic models, point-based for deterministic baselines
     if cfg.get('loss_fn') == "mae":
-        loss_fn = torch_metrics.MaskedMAE()
+        # For deterministic baselines, use point MAE; for learned models, use sample MAE
+        loss_fn = torch_metrics.MaskedMAE() if is_baseline_or_icon and not is_icon_model(cfg.model.name) else lib.metrics.SampleMAE()
     elif cfg.get('loss_fn') == "ens":
         loss_fn = lib.metrics.EnergyScore()
     else:
-        # Default to MAE if not specified
-        loss_fn = torch_metrics.MaskedMAE()
+        # Default to SampleMAE for probabilistic evaluation
+        loss_fn = lib.metrics.SampleMAE()
     
     mae_at = [1, 3, 6, 12, 18, 24]
     point_metrics = {'mae': torch_metrics.MaskedMAE(),
@@ -208,18 +237,26 @@ def run(cfg: DictConfig):
     else:
         scheduler_class = scheduler_kwargs = None
 
-    # select the appropriate predictor    
-    if isinstance(loss_fn, lib.metrics.SampleMetric):
+    # Use regular Predictor for baseline models (deterministic), SamplingPredictor for learned models (probabilistic)
+    # Note: is_baseline_or_icon is already computed above when setting loss_fn
+    if is_baseline_or_icon and not isinstance(loss_fn, lib.metrics.SampleMetric):
+        # Deterministic baseline models use regular Predictor with point metrics only
+        predictor_class = Predictor
+        log_metrics = point_metrics
+        predictor_kwargs = {}
+        monitored_metric = 'val_mae'
+    else:
+        # Learned models and ICON use SamplingPredictor for probabilistic evaluation
         predictor_class = SamplingPredictor
         assert not point_metrics.keys() & sample_metrics.keys()
         log_metrics = dict(**point_metrics, **sample_metrics)
         predictor_kwargs = dict(**cfg.get('sampling', {}))
-        monitored_metric = 'val_smae'
-    else:
-        predictor_class = Predictor
-        log_metrics = point_metrics
-        predictor_kwargs = dict()
-        monitored_metric = 'val_mae'
+        
+        # Monitor validation metric based on loss type
+        if isinstance(loss_fn, lib.metrics.SampleMetric):
+            monitored_metric = 'val_smae'
+        else:
+            monitored_metric = 'val_mae'
     
     # setup predictor
     predictor = predictor_class(
@@ -284,7 +321,9 @@ def run(cfg: DictConfig):
                       logger=exp_logger,
                       accelerator='gpu' if torch.cuda.is_available() else 'cpu',
                       gradient_clip_val=cfg.grad_clip_val,
-                      callbacks=[early_stop_callback, checkpoint_callback, lr_monitor]
+                      accumulate_grad_batches=cfg.get('accumulate_grad_batches', 1),
+                      callbacks=[early_stop_callback, checkpoint_callback, lr_monitor],
+                      enable_progress_bar=False  # Disable tqdm to keep logs concise
                       )
 
     load_model_path = cfg.get('load_model_path')

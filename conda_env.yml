@@ -23,3 +23,7 @@ dependencies:
       - torch-spatiotemporal[experiment]==0.9.5
       - mlflow
       - "peakweather[topography] @ git+https://github.com/MeteoSwiss/PeakWeather@main"
+      - optuna
+      - optuna-dashboard
+      - seaborn
+      - statsmodels

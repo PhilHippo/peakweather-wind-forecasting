@@ -18,10 +18,10 @@ dataset:
     first_test_ts: [2024, 4, 1]
 
   connectivity:
-    threshold: 0.8
+    threshold: 0.5 
     theta: null
     include_self: false
-    knn: 8
+    knn: 12 
     layout: edge_index
 
   # Temporal encodings - important for temperature seasonality
@@ -52,7 +52,8 @@ horizon: 24    # 24-hour forecast
 stride: 1
 
 #### Scaling ##################################################################
+# Note: Using global scaling instead of per-node to handle nodes with no valid data
 scaler:
   method: Standard
-  axis: node      # Scale per-node (each station has different baseline temperature)
+  axis: global    # Scale globally across all nodes (some nodes have 0 valid timesteps)
   scale_target: true

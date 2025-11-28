@@ -17,8 +17,8 @@ model:
     graph_tau: 0.7
     dropout: 0.2
 
-window: 168
+window: 72 
 horizon: 24
 stride: 1
-#TODO: for some reason does not work with ens
-loss_fn: mae
+loss_fn: ens
+patience: 40

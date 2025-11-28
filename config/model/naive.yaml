@@ -6,3 +6,6 @@ model:
   name: naive
   hparams: {}
 
+# Override loss function for deterministic baseline
+loss_fn: mae
+

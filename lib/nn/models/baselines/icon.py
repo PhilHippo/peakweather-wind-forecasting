@@ -19,7 +19,7 @@ class ICONData:
 
     def __init__(self, pw_dataset, stations=None, root=None):
         self.stations = pw_dataset.nodes if stations is None else stations
-        
+
         if pw_dataset.icon_data is None:
             raise ValueError(
                 "No ICON data loaded. Set extended_nwp_vars=['temperature'] in dataset config."

@@ -12,16 +12,17 @@ hydra:
 experiment_name: peakweather_temperature
 mlflow_tracking_uri: null
 
-workers: 0
-num_threads: 1
+workers: 4
+num_threads: 4
 
 #### Training params ##########################################################
 epochs: 200
-patience: 20
-batch_size: 32
+patience: 40
+batch_size: 16  # Physical batch size per GPU
+accumulate_grad_batches: 2  # Effective batch size = batch_size * accumulate_grad_batches = 32
 grad_clip_val: 5
 
-loss_fn: mae
+loss_fn: ens  
 
 sampling:
   mc_samples_train: 16
@@ -37,5 +38,6 @@ optimizer:
   name: Adam
   hparams:
     lr: 0.001
+    weight_decay: 0.0001
 
 load_model_path: null

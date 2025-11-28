@@ -317,7 +317,22 @@ class AttentionLongTermSTGNN(BaseModel):
         node_idx: Optional[Tensor] = None,
         mc_samples: Optional[int] = None,
     ) -> Tensor:
-        del edge_index, edge_weight, v, mc_samples
+        """Forward pass.
+        
+        Args:
+            x: Input tensor of shape [batch, time, nodes, features].
+            edge_index: Edge indices (not used, graph is learned internally).
+            edge_weight: Edge weights (not used).
+            u: Exogenous features.
+            v: Additional exogenous features (not used).
+            node_idx: Node indices for subset selection.
+            mc_samples: Number of Monte Carlo samples for probabilistic output.
+            
+        Returns:
+            Predictions of shape [batch, horizon, nodes, output_size] or
+            [mc_samples, batch, horizon, nodes, output_size] if mc_samples is set.
+        """
+        del edge_index, edge_weight, v
         x = self._merge_features(x, u)
         x = self.feature_proj(x)
         b, _, n, _ = x.shape
@@ -335,5 +350,12 @@ class AttentionLongTermSTGNN(BaseModel):
         out = self.readout(features.view(-1, features.size(-1)))
         out = out.view(b, n, self.horizon, self.output_size)
         out = out.permute(0, 2, 1, 3)
+        
+        # Generate samples if mc_samples is provided
+        if mc_samples is not None:
+            sigma = out.std(dim=(1, 2), keepdim=True).clamp(min=1e-6)
+            noise_shape = (mc_samples, b, self.horizon, n, self.output_size)
+            out = out.unsqueeze(0) + sigma * torch.randn(*noise_shape, device=out.device)
+        
         return out
 
