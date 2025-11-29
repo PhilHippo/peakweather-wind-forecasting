@@ -12,12 +12,13 @@ hydra:
 experiment_name: peakweather_temperature
 mlflow_tracking_uri: null
 
+seed: null
+
 workers: 4
-num_threads: 4
 
 #### Training params ##########################################################
-epochs: 200
-patience: 40
+epochs: 120
+patience: 25
 batch_size: 16  # Physical batch size per GPU
 accumulate_grad_batches: 2  # Effective batch size = batch_size * accumulate_grad_batches = 32
 grad_clip_val: 5

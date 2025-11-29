@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import omegaconf
 import torch
@@ -6,6 +7,7 @@ from omegaconf import DictConfig
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 from pytorch_lightning.loggers import MLFlowLogger
+import pytorch_lightning as pl
 from tsl import logger
 from tsl.data import SpatioTemporalDataset, SpatioTemporalDataModule
 from tsl.data.preprocessing import scalers
@@ -55,6 +57,23 @@ def is_icon_model(model_str: str) -> bool:
 
 
 def run(cfg: DictConfig):
+    ########################################
+    # Set Random Seed                      #
+    ########################################
+    
+    # Get seed from config (can be set via command line: seed=1)
+    # If not provided, Hydra will auto-generate one in cfg.run.seed
+    seed = cfg.get('seed', None)
+    if seed is None:
+        # Fall back to Hydra's auto-generated seed if available
+        seed = cfg.get('run', {}).get('seed', None)
+    
+    if seed is not None:
+        # Set seed for reproducibility
+        pl.seed_everything(seed, workers=True)
+        logger.info(f"Seed set to {seed}")
+    
+    
     ########################################
     # Get Dataset                          #
     ########################################
@@ -163,6 +182,7 @@ def run(cfg: DictConfig):
         if np.isinf(covs['v']).any():
             raise ValueError(f"Found {np.isinf(covs['v']).sum()} Inf values in static attributes - check standardization!")
 
+    print("Creating data module...")
     dm = SpatioTemporalDataModule(
         dataset=torch_dataset,
         scalers=transform,
@@ -174,7 +194,9 @@ def run(cfg: DictConfig):
         batch_size=cfg.batch_size,
         workers=cfg.get('workers', 0)
     )
+    print("Setting up data module...")
     dm.setup()
+    print("Data module setup complete.")
 
     print(f"Split sizes\n\tTrain: {len(dm.trainset)}\n"
           f"\tValidation: {len(dm.valset)}\n"
@@ -323,7 +345,8 @@ def run(cfg: DictConfig):
                       gradient_clip_val=cfg.grad_clip_val,
                       accumulate_grad_batches=cfg.get('accumulate_grad_batches', 1),
                       callbacks=[early_stop_callback, checkpoint_callback, lr_monitor],
-                      enable_progress_bar=False  # Disable tqdm to keep logs concise
+                      enable_progress_bar=False,  # Disable tqdm to keep logs concise
+                      log_every_n_steps=50  # Log every 50 steps to see progress
                       )
 
     load_model_path = cfg.get('load_model_path')
@@ -342,9 +365,19 @@ def run(cfg: DictConfig):
         predictor.load_model(load_model_path)
         result = dict()
     else:
+        print("\n" + "="*80)
+        print("Starting training...")
+        print("="*80)
+        train_loader = dm.train_dataloader()
+        val_loader = dm.val_dataloader()
+        print(f"Train batches: {len(train_loader)}")
+        print(f"Val batches: {len(val_loader)}")
+        print("Calling trainer.fit()...")
+        sys.stdout.flush()  # Force output flush
+        
         trainer.fit(predictor,
-                    train_dataloaders=dm.train_dataloader(),
-                    val_dataloaders=dm.val_dataloader())
+                    train_dataloaders=train_loader,
+                    val_dataloaders=val_loader)
         best_checkpoint_path = checkpoint_callback.best_model_path
         predictor.load_model(best_checkpoint_path)
         
