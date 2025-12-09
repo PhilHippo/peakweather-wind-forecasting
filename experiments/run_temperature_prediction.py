@@ -28,6 +28,7 @@ LEARNABLE_MODELS = {
     'stgnn': models.STGNN,
     'attn_longterm': models.AttentionLongTermSTGNN,
     'model3': models.Model3,
+    'model3_old': models.Model3Old,
 }
 
 # Baseline models (no training required)

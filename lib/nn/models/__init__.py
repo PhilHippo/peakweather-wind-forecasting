@@ -4,6 +4,7 @@ from .learnable_models import (
     STGNN,
     AttentionLongTermSTGNN,
     Model3,
+    Model3Old
 )
 from .baselines import (
     ICONData,
