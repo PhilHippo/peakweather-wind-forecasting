@@ -16,7 +16,7 @@ dataset:
       - sunshine
     freq: h
     # comment station_type to include both station types (meteo and rain gauges) - 41 rain gauges have temperature data
-    # station_type: meteo_station
+    station_type: meteo_station
 
   splitting:
     first_val_ts: [2024, 1, 1]
@@ -68,5 +68,5 @@ scaler:
 #   - rain_gauge_with_temp: Only rain gauges that have temperature data (~40 stations)
 #   - all_with_temp: All stations with temperature data (meteo + rain gauges with temp)
 test_subsets:
-  - meteo_only              # Test on meteo stations only
-  - all_with_temp           # Test on all stations with temperature data
+  # - meteo_only              # Test on meteo stations only
+  # - all_with_temp           # Test on all stations with temperature data

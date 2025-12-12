@@ -128,6 +128,13 @@ python -m experiments.run_temperature_prediction dataset=temperature model=icon
 - **Resolution**: Hourly (resampled from 10-minute)
 - **Time span**: Jan 2017 - Mar 2025
 
+### Dataset Analysis
+
+The `dataset_analysis.ipynb` notebook provides exploratory data analysis including:
+- Station spatial distribution and elevation statistics
+- Temperature data availability and missing data analysis per station
+- Correlation analysis between meteorological variables
+
 ### Data Splits
 
 | Split      | Period               |
@@ -140,6 +147,25 @@ python -m experiments.run_temperature_prediction dataset=temperature model=icon
 
 - **Input window**: 72 hours (3 days)
 - **Forecast horizon**: 24 hours
+
+## Reproducing Paper Results
+
+To reproduce the learnable model results from the paper (TCN, RNN, STGNN, Attention STGNN) across seeds 1-5:
+
+```bash
+bash run_all_seeds.sh
+```
+
+## Station Configuration
+
+Control which stations to use for training and testing in `config/dataset/temperature.yaml`:
+
+| Setting | Effect |
+| ------- | ------ |
+| `station_type: meteo_station` | Train on meteo stations only |
+| `station_type: null` | Train on all stations including rain gauges with temperature |
+| `test_subsets: []` | Test on training stations only |
+| `test_subsets: [meteo_only, all_with_temp]` | Test on multiple station subsets |
 
 ## Configuration
 
